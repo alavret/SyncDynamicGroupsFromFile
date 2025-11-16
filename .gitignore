@@ -1,5 +1,7 @@
 # Environment variables
-.env_ldap
+!.env_ldap
+.env_ldap.bak
+
 
 # Python
 __pycache__/
@@ -45,3 +47,16 @@ schedule_*.docx
 .DS_Store
 Thumbs.db
 
+# Documentation - ignore all .md files except README.md
+*.md
+!README.md
+
+# CSV files - ignore all except specific file
+*.csv
+!Группа_рассылки_Динамическая_группа_рассылки.csv
+
+*.py
+!sync_dd_from_file.py
+
+# Requirements file
+!requirements_ldap.txt
