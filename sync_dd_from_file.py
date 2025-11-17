@@ -254,11 +254,8 @@ def get_group_members_from_file(ad_group: dict, members_files_dir: str = "."):
         logger.error("Группа не имеет атрибута 'displayName'. Невозможно определить имя файла.")
         return []
     
-    # Заменяем пробелы на подчеркивания
-    display_name_formatted = display_name.replace(' ', '_')
-    
     # Формируем имя файла
-    filename = f"Группа_рассылки_{display_name_formatted}.csv"
+    filename = f"{display_name}.csv"
     
     # Формируем полный путь к файлу
     file_path = os.path.join(members_files_dir, filename)
@@ -1890,7 +1887,7 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
             
             # Проверяем name
             y360_name = y360_group.get('name', '')
-            if y360_name != display_name:
+            if y360_name.lower() != display_name.lower():
                 logger.info(f"Группа '{display_name}' (ID: {group_id}): поле 'name' отличается.")
                 logger.info(f"  В Y360: '{y360_name}' → В AD: '{display_name}'")
                 changes_needed['name'] = display_name
@@ -1898,14 +1895,14 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
             # Проверяем label
             y360_label = y360_group.get('label', '')
             if expected_label:
-                if y360_label != expected_label:
+                if y360_label.lower() != expected_label.lower():
                     logger.info(f"Группа '{display_name}' (ID: {group_id}): поле 'label' отличается.")
                     logger.info(f"  В Y360: '{y360_label}' → В AD: '{expected_label}'")
                     changes_needed['label'] = expected_label
             
             # Проверяем description
             y360_description = y360_group.get('description', '')
-            if y360_description != expected_description:
+            if y360_description.lower() != expected_description.lower():
                 logger.info(f"Группа '{display_name}' (ID: {group_id}): поле 'description' отличается.")
                 logger.info(f"  В Y360: '{y360_description}' → В AD: '{expected_description}'")
                 changes_needed['description'] = expected_description
