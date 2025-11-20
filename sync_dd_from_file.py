@@ -12,7 +12,7 @@ from http import HTTPStatus
 import time
 import csv
 
-LOG_FILE = "sync_deps.log"
+LOG_FILE = "sync_dd_from_file.log"
 EMAIL_DOMAIN = "domain.ru"
 DEFAULT_360_API_URL = "https://api360.yandex.net"
 ITEMS_PER_PAGE = 100
@@ -26,7 +26,7 @@ GROUPS_PER_PAGE_FROM_API = 1000
 SENSITIVE_FIELDS = ['password', 'oauth_token', 'access_token', 'token']
 EXIT_CODE = 1
 
-logger = logging.getLogger("sync_deps")
+logger = logging.getLogger("sync_dd_from_file")
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
@@ -208,6 +208,66 @@ def get_ldap_dynamic_groups(settings: "SettingParams"):
     conn.unbind()
     
     return groups
+
+
+def load_group_exceptions(file_path: str):
+    """
+    Загружает список имён групп-исключений из файла.
+    
+    Функция читает текстовый файл, где каждая строка содержит имя группы,
+    которую не нужно синхронизировать. Пустые строки и строки, начинающиеся 
+    с символа '#' (комментарии), игнорируются.
+    
+    Args:
+        file_path (str): Путь к файлу со списком групп-исключений
+        
+    Returns:
+        list: Список имён групп-исключений. Возвращает пустой список 
+              если файл не существует или произошла ошибка.
+    
+    Example:
+        Содержимое файла group_exceptions.txt:
+        # Это комментарий
+        Группа для тестов
+        Временная группа
+        
+        Архивная группа
+        
+        exceptions = load_group_exceptions('group_exceptions.txt')
+        # Результат: ['Группа для тестов', 'Временная группа', 'Архивная группа']
+    
+    Note:
+        - Пустые строки игнорируются
+        - Строки, начинающиеся с '#', считаются комментариями и игнорируются
+        - Пробелы в начале и конце строк удаляются
+        - Если файл не существует, возвращается пустой список и выводится предупреждение
+    """
+    exceptions = []
+    
+    # Проверяем существование файла
+    if not os.path.exists(file_path):
+        logger.warning(f"Файл с исключениями групп '{file_path}' не найден. Будут обработаны все группы.")
+        return exceptions
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            logger.info(f"Загрузка списка групп-исключений из файла: {file_path}")
+            line_count = 0
+            for line in f:
+                line = line.strip()
+                # Пропускаем пустые строки и комментарии
+                if line and not line.startswith('#'):
+                    exceptions.append(line)
+                    line_count += 1
+            
+            logger.info(f"Загружено {line_count} групп-исключений из файла {file_path}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при чтении файла с исключениями групп '{file_path}': {e}")
+        logger.error(f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}")
+        return []
+    
+    return exceptions
 
 
 def get_group_members_from_file(ad_group: dict, members_files_dir: str = "."):
@@ -438,6 +498,7 @@ class SettingParams:
     members_files_dir : str
     enable_diagnostics : bool
     y360_group_members_dir : str
+    group_exceptions_file : str
 
 def get_settings():
     exit_flag = False
@@ -462,6 +523,7 @@ def get_settings():
         members_files_dir = os.environ.get('GROUPS_MEMBERS_FILE_DIR', '.'),
         enable_diagnostics = os.environ.get('ENABLE_DIAGNOSTICS', 'false').lower() == 'true',
         y360_group_members_dir = os.environ.get('Y360_GROUP_MEMBERS_DIR', './y360_diagnostics'),
+        group_exceptions_file = os.environ.get('GROUP_EXCEPTIONS_FILE', 'group_exceptions.txt'),
     )
     
     if not settings.oauth_token:
@@ -1749,11 +1811,13 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
     Синхронизирует динамические группы рассылки из Active Directory в Yandex 360.
     
     Функция выполняет следующие действия:
-    1. Принимает списки групп из AD и Y360
-    2. Сравнивает списки по objectGUID (из AD) и externalId (из Y360) в формате "DDG;<objectGUID>"
-    3. Для групп, отсутствующих в Y360 - создает их
-    4. Для существующих групп - проверяет соответствие полей (name, label, description) и обновляет при необходимости
-    5. Удаляет из Y360 группы с externalId "DDG;*", которых больше нет в AD
+    1. Загружает список групп-исключений из файла, указанного в настройках
+    2. Принимает списки групп из AD и Y360
+    3. Сравнивает списки по objectGUID (из AD) и externalId (из Y360) в формате "DDG;<objectGUID>"
+    4. Для групп из списка исключений - пропускает синхронизацию и удаляет из Y360 (если присутствуют)
+    5. Для групп, отсутствующих в Y360 - создает их
+    6. Для существующих групп - проверяет соответствие полей (name, label, description) и обновляет при необходимости
+    7. Удаляет из Y360 группы с externalId "DDG;*", которых больше нет в AD
     
     Args:
         settings: Объект настроек с параметрами подключения к API Yandex 360
@@ -1771,7 +1835,8 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
                     "updated_count": int,        # Количество обновленных групп
                     "deleted_count": int,        # Количество удаленных групп из Y360
                     "errors_count": int,         # Количество ошибок при создании/обновлении/удалении
-                    "skipped_count": int         # Количество пропущенных групп (без обязательных атрибутов)
+                    "skipped_count": int,        # Количество пропущенных групп (без обязательных атрибутов)
+                    "excluded_count": int        # Количество групп-исключений (не синхронизированы)
                 }
     
     Example:
@@ -1795,18 +1860,33 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
         в файле .env_ldap:
         ATTRIB_GROUP_LIST = distinguishedName,mail,displayName,description,objectCategory,sAMAccountName,msExchQueryFilter,cn,objectClass,objectGUID
         
+        Список групп-исключений загружается из файла, указанного в параметре GROUP_EXCEPTIONS_FILE
+        в файле .env_ldap. Группы, перечисленные в этом файле, не синхронизируются и удаляются 
+        из Yandex 360, если там присутствуют.
+        
         Функция сравнивает следующие поля:
         - name (Y360) с displayName (AD)
         - label (Y360) с частью до "@" из mail (AD)
         - description (Y360) с description (AD)
         
-        ВАЖНО: Функция удаляет из Yandex 360 группы с externalId, начинающимся с "DDG;", 
-        если соответствующий objectGUID не найден в Active Directory. Группы без externalId 
-        или с другим префиксом не удаляются.
+        ВАЖНО: Функция удаляет из Yandex 360:
+        1. Группы из списка исключений (если присутствуют в Y360)
+        2. Группы с externalId, начинающимся с "DDG;", если соответствующий objectGUID 
+           не найден в Active Directory
+        Группы без externalId или с другим префиксом не удаляются.
     """
     logger.info("=" * 80)
     logger.info("Начало синхронизации групп из Active Directory в Yandex 360...")
     logger.info("=" * 80)
+    
+    # Загружаем список групп-исключений
+    group_exceptions = load_group_exceptions(settings.group_exceptions_file)
+    logger.info(f"Загружено {len(group_exceptions)} групп-исключений.")
+    if group_exceptions:
+        logger.info("Группы-исключения:")
+        for exc_group in group_exceptions:
+            logger.info(f"  - {exc_group}")
+    logger.info("-" * 80)
     
     # Инициализация статистики
     stats = {
@@ -1816,7 +1896,8 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
         "updated_count": 0,
         "deleted_count": 0,
         "errors_count": 0,
-        "skipped_count": 0
+        "skipped_count": 0,
+        "excluded_count": 0
     }
     
     # Проверяем входные параметры
@@ -1846,6 +1927,9 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
     logger.info("-" * 80)
     
     # Проходим по каждой группе из AD
+    # Список групп-исключений, найденных в Y360 (для удаления)
+    excluded_groups_to_delete = []
+    
     for ad_group in ad_groups:
         object_guid = ad_group.get('objectGUID')
         display_name = ad_group.get('displayName')
@@ -1867,6 +1951,27 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
         if not mail:
             logger.warning(f"Группа с objectGUID '{object_guid}' не имеет атрибута mail. Пропускаем.")
             stats["skipped_count"] += 1
+            continue
+        
+        # Проверяем, находится ли группа в списке исключений
+        if display_name in group_exceptions:
+            logger.info(f"Группа '{display_name}' найдена в списке исключений. Пропуск синхронизации.")
+            stats["excluded_count"] += 1
+            
+            # Проверяем, существует ли эта группа в Y360
+            external_id = f"DDG;{object_guid}"
+            if external_id in y360_groups_by_external_id:
+                y360_group = y360_groups_by_external_id[external_id]
+                group_id = y360_group.get('id')
+                logger.info(f"  Группа '{display_name}' найдена в Yandex 360 (ID: {group_id}). Будет удалена.")
+                excluded_groups_to_delete.append({
+                    'id': group_id,
+                    'name': display_name,
+                    'externalId': external_id,
+                    'objectGUID': object_guid
+                })
+            
+            # Переходим к следующей группе
             continue
         
         # Формируем externalId в формате "DDG;<objectGUID>"
@@ -1972,6 +2077,32 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
         if not settings.dry_run:
             time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
     
+    # Удаляем группы-исключения, найденные в Y360
+    if excluded_groups_to_delete:
+        logger.info("-" * 80)
+        logger.info(f"Найдено {len(excluded_groups_to_delete)} групп-исключений в Yandex 360 для удаления.")
+        logger.info("-" * 80)
+        
+        for group in excluded_groups_to_delete:
+            logger.info(f"Удаление группы-исключения '{group['name']}' (ID: {group['id']}, objectGUID: {group['objectGUID']})...")
+            logger.info("  Причина: группа находится в списке исключений")
+            
+            if not settings.dry_run:
+                success, result = delete_group_by_api(settings, group['id'])
+                if success and result.get('removed'):
+                    stats["deleted_count"] += 1
+                    logger.info(f"  ✓ Группа-исключение '{group['name']}' успешно удалена")
+                else:
+                    stats["errors_count"] += 1
+                    logger.error(f"  ✗ Ошибка при удалении группы-исключения '{group['name']}'")
+            else:
+                logger.info(f"  DRY RUN: Группа-исключение '{group['name']}' будет удалена")
+                stats["deleted_count"] += 1
+            
+            # Небольшая задержка между вызовами API
+            if not settings.dry_run:
+                time.sleep(SLEEP_TIME_BETWEEN_API_CALLS)
+    
     # Проверяем группы из Y360, которых нет в AD (для удаления)
     logger.info("-" * 80)
     logger.info("Проверка групп в Yandex 360, которых нет в Active Directory...")
@@ -2045,6 +2176,8 @@ def sync_ad_groups_to_y360(settings: "SettingParams", ad_groups: list, y360_grou
         logger.info(f"Обновлено существующих групп: {stats['updated_count']}")
     if stats['deleted_count'] > 0:
         logger.info(f"Удалено групп из Yandex 360: {stats['deleted_count']}")
+    if stats['excluded_count'] > 0:
+        logger.info(f"Исключено из синхронизации (группы-исключения): {stats['excluded_count']}")
     if stats['skipped_count'] > 0:
         logger.warning(f"Пропущено групп (отсутствуют обязательные атрибуты): {stats['skipped_count']}")
     if stats['errors_count'] > 0:
